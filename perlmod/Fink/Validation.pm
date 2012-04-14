@@ -23,7 +23,7 @@
 
 package Fink::Validation;
 
-use Fink::Services qw(&read_properties &read_properties_var &expand_percent &file_MD5_checksum &pkglist2lol &version_cmp);
+use Fink::Services qw(&read_properties &read_properties_var &expand_percent &expand_percent2 &file_MD5_checksum &pkglist2lol &version_cmp);
 use Fink::Config qw($config);
 use Cwd qw(getcwd);
 use File::Find qw(find);
@@ -49,10 +49,11 @@ our @EXPORT_OK;
 our @set_vars =
 	qw(
 		cc cflags cpp cppflags cxx cxxflags dyld_library_path
-		ld_prebind ld_prebind_allow_overlap ld_force_no_prebind
-		ld_seg_addr_table ld ldflags library_path libs
+		ld ldflags library_path libs
 		macosx_deployment_target make mflags makeflags path
 	);
+# FIXME: (No)SetPATH is undocumented
+# FIXME: On the other hand, (No)SetJAVA_HOME *is* documented (but unused)
 
 # Required fields.
 our @required_fields = map {lc $_}
@@ -63,7 +64,7 @@ our @splitoff_required_fields = map {lc $_}
 # All fields that expect a boolean value
 our %boolean_fields = map {$_, 1}
 	(
-		qw(builddependsonly addshlibdeps essential nosourcedirectory updateconfigguess updatelibtool updatepod noperltests usemaxbuildjobs),
+		qw(builddependsonly essential nosourcedirectory updateconfigguess updatelibtool updatepod noperltests usemaxbuildjobs buildasnobody),
 		map {"noset".$_} @set_vars
 	);
 
@@ -73,7 +74,7 @@ our %obsolete_fields = map {$_, 1}
 
 # Fields to check for hardcoded /sw
 our %check_hardcode_fields = map {$_, 1}
-	( 
+	(
 		qw(
 		 patchscript
 		 configureparams
@@ -105,14 +106,14 @@ our %text_describe_fields = map {$_, 1}
 		);
 
 # Allowed values for the license field: note that there are now "new-style"
-# GPL license fields which follow the string "GPL" with either "2", "3", or 
+# GPL license fields which follow the string "GPL" with either "2", "3", or
 # "23", optionally followed by "+".  Rather than list all the possibilities
 # here, we use some regexp magic later on.
 our %allowed_license_values = map {$_, 1}
 	(
-	 "GPL", "LGPL", "GPL/LGPL", "BSD", "Artistic", "Artistic/GPL", "GFDL", 
-	 "GPL/GFDL", "LGPL/GFDL", "GPL/LGPL/GFDL", "LDP", "GPL/LGPL/LDP", 
-	 "OSI-Approved", "Public Domain", "Restrictive/Distributable", 
+	 "GPL", "LGPL", "GPL/LGPL", "BSD", "Artistic", "Artistic/GPL", "GFDL",
+	 "GPL/GFDL", "LGPL/GFDL", "GPL/LGPL/GFDL", "LDP", "GPL/LGPL/LDP",
+	 "OSI-Approved", "Public Domain", "Restrictive/Distributable",
 	 "Restrictive", "Commercial", "DFSG-Approved"
 	);
 
@@ -124,7 +125,7 @@ our %allowed_arch_values = map {lc $_, 1}
 	 'x86_64',
 	);
 
-# List of all valid fields, 
+# List of all valid fields,
 # sorted in the same order as in the packaging manual.
 # (A few are handled elsewhere in this module, but are also included here,
 #  commented out, for easier reference when comparing with the manual.)
@@ -159,7 +160,6 @@ our %valid_fields = map {$_, 1}
 		 'pre-depends',
 		 'essential',
 		 'builddependsonly',
-		 'addshlibdeps',
 #  unpack phase:
 		 'custommirror',
 		 'source',
@@ -195,6 +195,7 @@ our %valid_fields = map {$_, 1}
 		 'compilescript',
 		 'noperltests',
 		 'usemaxbuildjobs',
+		 'buildasnobody',
 #  install phase:
 		 'updatepod',
 		 'installscript',
@@ -235,6 +236,7 @@ our %splitoff_valid_fields = map {$_, 1}
 		 'license',
 #  dependencies:
 		 'depends',
+		 'runtimedepends',
 		 'provides',
 		 'conflicts',
 		 'replaces',
@@ -277,6 +279,7 @@ our %pkglist_fields = map {lc $_, 1}
 	(
 	 'Depends',
 	 'BuildDepends',
+	 'RuntimeDepends',
 	 'Conflicts',
 	 'BuildConflicts',
 	 'TestDepends',
@@ -285,6 +288,8 @@ our %pkglist_fields = map {lc $_, 1}
 	 'Suggests',
 	 'Recommends',
 	 'Enhances',
+	 # 'Architecture' is not a "Depends"-style list, but its syntax is
+	 # like a package-list, so piggy-back on those fields' parser
 	 'Architecture',
 	);
 
@@ -320,7 +325,7 @@ END { }				# module clean-up code here (global destructor)
 #
 # Check a given .deb file for standard compliance
 # returns boolean of whether everything is okay
-# 
+#
 # Should check/verify the following in .info files:
 #	+ the filename matches %f.info
 #	+ patch file (from Patch and PatchScript) is present
@@ -389,7 +394,7 @@ sub validate_info_file {
 	if ($config->verbosity_level() >= 3) {
 		print "Validating package file $filename...\n";
 	}
-	
+
 	#
 	# Check for line endings before reading properties
 	#
@@ -412,7 +417,7 @@ sub validate_info_file {
 	$test_properties = &read_properties_var(
 		"InfoTest of $filename",
 		$properties->{infotest}, {remove_space => 1}) if $properties->{infotest};
-	
+
 	# determine the base path
 	if (defined $val_prefix) {
 		$basepath = $val_prefix;
@@ -508,9 +513,12 @@ sub validate_info_file {
 	$pkgversion = '' unless defined $pkgversion;
 	$pkgrevision = $properties->{revision};
 	$pkgrevision = '' unless defined $pkgrevision;
+	$pkgepoch = $properties->{epoch};
+	$pkgepoch = '' unless defined $pkgepoch;
+	# TODO: If epoch has been specified, the pkgfullname should make use of it, too
 	$pkgfullname = "$pkgname-$pkgversion-$pkgrevision";
 	$pkgdestdir = "$buildpath/root-".$pkgfullname;
-	
+
 	if ($filename =~ /\//) {
 		my @parts = split(/\//, $filename);
 		$filename = pop @parts;		# remove filename
@@ -538,7 +546,14 @@ sub validate_info_file {
 		print "'.' and '+' ($filename)\n";
 		$looks_good = 0;
 	}
-	
+	if ($pkgepoch !~ /^([1-9][0-9]*)?$/) {
+		# Strictly speaking "0" is also a legal epoch (and in fact the default epoch
+		# value), but we don't want people to add "Epoch: 0" fields to their packages,
+		# so we forbid that.
+		print "Error: Package epoch must be a positive integer ($filename)\n";
+		$looks_good = 0;
+	}
+
 	# TODO: figure out how to validate multivariant Type:
 	#  - make sure syntax is okay
 	#  - make sure each type appears as a type_*[] in Package
@@ -635,24 +650,41 @@ sub validate_info_file {
 			# fink recently changed .tar.xz source handling (now
 			# auto-extracts) and maybe other .xz effects as well
 			if (exists $source_props->{$_} and $source_props->{$_} =~ /\.xz$/ ) {
-				$looks_good=0 unless _min_fink_version($properties->{builddepends}, '0.30.3', 'use of a .xz source archive', $filename); 
-				}
-				}
+				$looks_good=0 unless _min_fink_version($properties->{builddepends}, '0.32', 'use of a .xz source archive', $filename); 
 			}
 		}
-		
 	}
+	
+	$expand = { 'n' => $pkgname,
+				'N' => $pkgname,
+				'v' => $pkgversion,
+				'V' => $pkgversion,
+				'r' => $pkgrevision,
+				'e' => $pkgepoch,
+				'f' => $pkgfullname,
+				'p' => $basepath, 'P' => $basepath,
+				'd' => $pkgdestdir,
+				'i' => $pkgdestdir.$basepath,
+#				'a' => $pkgpatchpath,
+				'b' => '.',
+				'm' => $config->param('Architecture'),
+				%{$expand},
+				'ni' => $pkginvarname,
+				'Ni' => $pkginvarname
+	};
 
 	if (&validate_info_component(
 			 properties => $properties,
 			 filename => $filename,
 			 info_level => $info_level,
+			 expand => $expand,
 		) == 0) {
 		$looks_good = 0;
 	} elsif ($properties->{infotest} and &validate_info_component(
 				 properties => $test_properties,
 				 filename => $filename,
 				 info_level => $info_level,
+				 expand => $expand,
 				 is_infotest => 1,
 			 ) == 0) {
 		$looks_good = 0;
@@ -703,7 +735,7 @@ sub validate_info_file {
 			my $testfield = $1 || "";
 			my $sourcefield = defined $+  # corresponding Source(N) field
 				? "${testfield}source$+"
-				: "${testfield}source";  
+				: "${testfield}source";
 			if ($testfield ? (!exists $test_source_fields{$sourcefield}) : (!exists $source_fields{$sourcefield})) {
 				my $msg = $field =~ /-(checksum|md5)$/
 					? "Warning" # no big deal
@@ -742,6 +774,7 @@ sub validate_info_file {
 					 splitoff_field => $splitoff_field,
 					 filename => $filename,
 					 info_level => $info_level,
+					 expand => { 'N' => $pkgname, %{$expand} },
 					 builddepends => $properties->{builddepends},
 				) == 0) {
 				$looks_good = 0;
@@ -761,10 +794,10 @@ sub validate_info_file {
 	};
 
 	# Loop over all fields and verify them
-	while(my($field, $value) = each(%$properties)) {
+	while (my($field, $value) = each(%$properties)) {
 		$field_check->($field, $value, 0);
 	}
-	while(my($field, $value) = each(%$test_properties)) {
+	while (my($field, $value) = each(%$test_properties)) {
 		$field_check->($field, $value, 1);
 	}
 
@@ -783,12 +816,12 @@ sub validate_info_file {
 	if (not (defined $value and length $value)) {
 		print "Error: No package description supplied. ($filename)\n";
 		$looks_good = 0;
-	} elsif (length($value) > 60 and !&obsolete_via_depends($properties->{depends}) ) {
+	} elsif (length($value) > 60 and !&obsolete_via_depends($properties) ) {
 		print "Error: Length of package description exceeds 60 characters. ($filename)\n";
 		$looks_good = 0;
 	} elsif (Fink::Config::get_option("Pedantic")) {
 		# Some pedantic checks
-		if (length($value) > 45 and !&obsolete_via_depends($properties->{depends}) ) {
+		if (length($value) > 45 and !&obsolete_via_depends($properties) ) {
 			print "Warning: Length of package description exceeds 45 characters. ($filename)\n";
 			$looks_good = 0;
 		}
@@ -800,7 +833,7 @@ sub validate_info_file {
 			print "Warning: Description starts with lower case. ($filename)\n";
 			$looks_good = 0;
 		}
-		if ($value =~ /(\b\Q$pkgname\E\b|%\{?n)/i and !&obsolete_via_depends($properties->{depends}) ) {
+		if ($value =~ /(\b\Q$pkgname\E\b|%\{?n)/i and !&obsolete_via_depends($properties) ) {
 			print "Warning: Description contains package name. ($filename)\n";
 			$looks_good = 0;
 		}
@@ -813,21 +846,6 @@ sub validate_info_file {
 			$looks_good = 0;
 		}
 	}
-	
-	$expand = { 'n' => $pkgname,
-				'v' => $pkgversion,
-				'r' => $pkgrevision,
-				'f' => $pkgfullname,
-				'p' => $basepath, 'P' => $basepath,
-				'd' => $pkgdestdir,
-				'i' => $pkgdestdir.$basepath,
-#				'a' => $pkgpatchpath,
-				'b' => '.',
-				'm' => $config->param('Architecture'),
-				%{$expand},
-				'ni' => $pkginvarname,
-				'Ni' => $pkginvarname
-	};
 
 	my %patchfile_fields = map { lc $_, 1 } grep { /^patchfile(|[2-9]|[1-9]\d+)$/ } keys %$properties;
 	my %patchfile_md5_fields = map { lc $_, 1 } grep { /^patchfile(|[2-9]|[1-9]\d+)-md5$/ } keys %$properties;
@@ -966,7 +984,7 @@ sub validate_info_file {
 		print "Error: Package has type \"dummy\". ($filename)\n";
 		$looks_good = 0;
 	}
-	
+
 	# instantiate the PkgVersion objects
 	my @pv = Fink::PkgVersion->pkgversions_from_info_file($full_filename, no_exclusions => 1);
 
@@ -1007,7 +1025,7 @@ sub _validate_info_filename {
 		if ($arch !~ /,/) {
 			# single-arch package
 			$arch =~ s/\s+//g;
-			
+
 			push @filearch, ("-$arch");
 		}
 	}
@@ -1015,7 +1033,7 @@ sub _validate_info_filename {
 		if ($dist !~ /,/) {
 			# single-dist package
 			$dist =~ s/\s+//g;
-			
+
 			push @filedist, ("-$dist");
 		}
 	}
@@ -1026,7 +1044,7 @@ sub _validate_info_filename {
 			}
 		}
 	}
-	
+
 	unless (grep $filename eq $_, @ok_filenames) {
 		print "Warning: Incorrect filename '$filename'. Should be one of:\n", map "\t$_\n", @ok_filenames;
 		return 0;
@@ -1087,6 +1105,7 @@ sub validate_info_component {
 	my $splitoff_field = $options{splitoff_field};
 	my $filename = $options{filename};
 	my $info_level = $options{info_level};
+	my $expand = $options{expand};
 	my $is_infotest = $options{is_infotest};
 
 	# make sure this $option is available even in parent
@@ -1101,7 +1120,7 @@ sub validate_info_component {
 		$splitoff_field = sprintf ' of "%s"', $splitoff_field;
 		@pkg_required_fields = @splitoff_required_fields;
 		%pkg_valid_fields = %splitoff_valid_fields;
-	} elsif($is_infotest) {
+	} elsif ($is_infotest) {
 		@pkg_required_fields = @infotest_required_fields;
 		%pkg_valid_fields = (%infotest_valid_fields, %valid_fields);
 	} else {
@@ -1207,6 +1226,12 @@ sub validate_info_component {
 					$looks_good = 0;
 				}
 			}
+
+			# verify only well-defined percent expansions are used.
+			&expand_percent2($value, $expand,
+			                  'err_action' => 'undef',
+			                  'err_info'   => $filename.' '.$field );
+
 			foreach my $atom (split /[,|]/, $pkglist) {
 				$atom =~ s/\A\s*//;
 				$atom =~ s/\s*\Z//;
@@ -1251,6 +1276,12 @@ sub validate_info_component {
 		}
 	}
 
+	# Packages using RuntimeDepends must BuildDepends on a fink that supports it
+	$value = $properties->{runtimedepends};
+	if (defined $value) {
+		$looks_good = 0 unless _min_fink_version($options{builddepends}, '0.32', 'use of RuntimeDepends', $filename);
+	}
+
 	# check syntax of each line of Shlibs field
 	$value = $properties->{shlibs};
 	if (defined $value) {
@@ -1260,7 +1291,7 @@ sub validate_info_component {
 			s/^\s*(.*?)\s*$/$1/;  # strip off leading/trailing whitespace
 			next unless /\S/;
 
-			if (s/^\(.*?\)\s*//) {	
+			if (s/^\(.*?\)\s*//) {
 				$looks_good = 0 unless _min_fink_version($options{builddepends}, '0.27.2', 'use of conditionals in Shlibs', $filename);
 		}
 
@@ -1306,7 +1337,7 @@ sub validate_info_component {
 				$libarch = $2;
 			}
 			# This hack only allows one particular percent expansion in the
-			# $libarch field, because this subroutine doesn't do percent 
+			# $libarch field, because this subroutine doesn't do percent
 			# expansions.  OK for now, but should be fixed eventually.
 			my $num_expand = {"type_num[-64bit]" => "64"};
 			$libarch = &expand_percent($libarch, $num_expand, $filename.' Package');
@@ -1366,6 +1397,7 @@ sub validate_info_component {
 	}
 
 	# support for new script templates
+	# TODO: This field is not documented.
 	if (exists $properties->{defaultscript}) {
 		$value = lc $properties->{defaultscript};
 		my $ds_min = {
@@ -1388,9 +1420,14 @@ sub validate_info_component {
 # given a (possibly undefined) Depends field, determine if it contains
 # the sentinel indicating the package with this Depends is "obsolete"
 sub obsolete_via_depends {
-	my $depends_field = shift;
-	return 0 unless defined $depends_field;
-	return $depends_field =~ /(\A|,)\s*fink-obsolete-packages(\(|\s|,|\Z)/;
+	my $properties = shift;
+	if (defined $properties->{depends}) {
+		return 1 if $properties->{depends} =~ /(\A|,)\s*fink-obsolete-packages(\(|\s|,|\Z)/;
+	}
+	if (defined $properties->{runtimedepends}) {
+		return 1 if $properties->{runtimedepends} =~ /(\A|,)\s*fink-obsolete-packages(\(|\s|,|\Z)/;
+	}
+	return 0;
 }
 
 #
@@ -1403,10 +1440,10 @@ sub validate_dpkg_file {
 
 	# create a dummy packaging directory (%d)
 	# NB: File::Temp::tempdir CLEANUP breaks if we fork!
-	my $destdir = tempdir('fink-validate-deb-unpack.XXXXXXXXXX', TMPDIR => 1 );
+	my $destdir = tempdir('fink-validate-deb-unpack.XXXXXXXXXX', DIR => File::Spec->tmpdir );
 
 	print "Validating .deb file $dpkg_filename...\n";
-	
+
 	# unpack the actual filesystem
 	if (system('dpkg', '-x', $dpkg_filename, $destdir)) {
 		print "Error: couldn't unpack .deb\n";
@@ -1440,7 +1477,7 @@ sub validate_dpkg_unpacked {
 	my $val_prefix = shift;  # %p
 
 	print "Validating .deb dir $destdir...\n";
-	
+
 	my $looks_good = &_validate_dpkg($destdir, $val_prefix);
 
 	return $looks_good;
@@ -1452,7 +1489,7 @@ sub validate_dpkg_unpacked {
 # returns boolean of whether everything is okay
 #
 # - usage of non-recommended directories (/sw/src, /sw/man, /sw/info, /sw/doc, /sw/libexec, /sw/lib/locale)
-# - usage of other non-standard subdirs 
+# - usage of other non-standard subdirs
 # - storage of a .bundle inside /sw/lib/perl5/darwin or /sw/lib/perl5/auto
 # - Emacs packages
 #     - installation of .elc files
@@ -1496,9 +1533,11 @@ sub _validate_dpkg {
 
 	# these are used in a regex and are automatically prepended with ^
 	# make sure to protect regex metachars!
-	my @bad_dirs = ("$basepath/src/", "$basepath/man/", "$basepath/info/", "$basepath/doc/", "$basepath/libexec/", "$basepath/lib/locale/", ".*/CVS/", ".*/RCS/", '.*/\.svn/', "$basepath/bin/.*/", "$basepath/sbin/.*/");
-	my @good_dirs = ( map "$basepath/$_", qw/ bin sbin include lib opt share var etc src Applications Library\/Frameworks / );
-	# allow $basepath/Library/ by itself
+	my @bad_dirs = ( map "$basepath/$_/", qw( src man info doc libexec lib/locale bin/.* sbin/.* ) );
+	push(@bad_dirs, ( map ".*/$_/", qw( CVS RCS \.svn \.git \.hg ) ) ); # forbid version control residues
+
+	my @good_dirs = ( map "$basepath/$_/", qw( bin sbin include lib opt share var etc Applications Library/Frameworks ) );
+	# allow $basepath/Library/ by itself, but with nothing below it other than what we explicitly allowed already
 	# (needed since we allow $basepath/Library/Frameworks)
 	push(@good_dirs, "$basepath/Library/\$");
 	push(@good_dirs, '/usr/X11');
@@ -1615,7 +1654,7 @@ sub _validate_dpkg {
 	{
 		my $vers = $deb_control->{version};
 		$vers = $1 if $vers =~ /:(.*)/;  # epoch not used in %b or %d
-		
+
 		$pkgbuilddir = sprintf '%s/%s-%s/', map { qr{\Q$_\E} } $buildpath, $deb_control->{source}, $vers;  # %b
 		$pkginstdirs = sprintf '%s/root-(?:%s|%s)-%s/', map { qr{\Q$_\E} } $buildpath, $deb_control->{source}, $deb_control->{package}, $vers;  # %d or %D
 	}
@@ -1655,9 +1694,12 @@ sub _validate_dpkg {
 					&stack_msg($msgs, "File installed outside of $basepath, /Applications/XDarwin.app, /private/etc/fonts, /usr/X11, and /usr/X11R6", $filename);
 				}
 			}
-		} elsif ($filename ne "$basepath/src/" and @found_bad_dir = grep { $filename =~ /^$_/ } @bad_dirs) {
+		} elsif ($filename eq "$basepath/src/") {
+			# FIXME: For some reason, we allow the inclusion of $basepath/src,
+			# which may exist but must be empty. The reason for this should either
+			# be documented, or this hack be removed.
+		} elsif (@found_bad_dir = grep { $filename =~ /^$_/ } @bad_dirs) {
 			# Directories from this list are not allowed to exist in the .deb.
-			# The only exception is $basepath/src which may exist but must be empty
 			&stack_msg($msgs, "File installed into deprecated directory $found_bad_dir[0]", $filename);
 		} elsif (not grep { $filename =~ /^$_/ } @good_dirs) {
 			# Directories from this list are the top-level dirs that may exist in the .deb.
@@ -1678,7 +1720,7 @@ sub _validate_dpkg {
 		}
 
 		# track whether BuildDependsOnly will be needed
-		if ($filename =~/^$basepath\/include\// && !-d $File::Find::name) {
+		if ($filename =~/\/include\// && !-d $File::Find::name) {
 			$installed_headers = 1;
 		}
 
@@ -1690,8 +1732,7 @@ sub _validate_dpkg {
 				my $file = $destdir . $filename;
 				if (not -l $file) {
 					$file =~ s/\'/\\\'/gs;
-					if (open(OTOOL, "$otool -hv '$file' |"))
-					{
+					if (open(OTOOL, "$otool -hv '$file' |")) {
 						while (my $line = <OTOOL>) {
 							if (my ($type) = $line =~ /MH_MAGIC.*\s+DYLIB(\s+|_STUB\s+)/) {
 								if ($filename !~ /\.(dylib|jnilib)$/) {
@@ -1766,27 +1807,29 @@ sub _validate_dpkg {
 			}
 		}
 
-		# check that libtool files don't link to temp locations
-		if ($filename =~/\.la$/) {
-			if (!-l $File::Find::name and open my $la_file, '<', $File::Find::name) {
-				while (<$la_file>) {
+		# libtool and pkg-config files don't link to temp locations
+		if ($filename =~ /\.(pc|la)$/) {
+			my $filetype = ($1 eq 'pc' ? 'pkg-config' : 'libtool');
+			if (!-l $File::Find::name and open my $datafile, '<', $File::Find::name) {
+				while (<$datafile>) {
+					chomp;
 					if (/$pkgbuilddir/) {
-						&stack_msg($msgs, "Libtool file points to fink build dir.", $filename);
+						&stack_msg($msgs, "Published compiler flag points to fink build dir.", $filename);
 						last;
 					} elsif (/$pkginstdirs/) {
-						&stack_msg($msgs, "Libtool file points to fink install dir.", $filename);
+						&stack_msg($msgs, "Published compiler flag points to fink install dir.", $filename);
 						last;
 					}
 				}
-				close $la_file;
+				close $datafile;
 			} elsif (!-l _) {
-				&stack_msg($msgs, "Couldn't read libtool file \"$filename\": $!");
+				&stack_msg($msgs, "Couldn't read $filetype file \"$filename\": $!");
 			}
 		}
 
 		# check that compiled python modules files don't self-identify using temp locations
 		if ($filename =~/\.py[co]$/) {
-			if (!-l $File::Find::name and open my $py_file, "strings $File::Find::name |") {
+			if (!-l $File::Find::name and open my $py_file, '-|', 'strings', $File::Find::name) {
 				while (<$py_file>) {
 					if (/$pkgbuilddir/) {
 						&stack_msg($msgs, "Compiled python module points to fink build dir.", $filename);
@@ -1817,7 +1860,7 @@ sub _validate_dpkg {
 			&stack_msg($msgs, "File in a language-versioned package is neither versioned nor in a versioned directory.", $filename);
 		}
 
-		# Check for common programmer mistakes relating to passing -framework flags in pkg-config files
+		# passing -framework flag and its argument as separate words
 		if ($filename =~ /\.(pc|la)$/) {
 			my $filetype = ($1 eq 'pc' ? 'pkg-config' : 'libtool');
 			if (!-l $File::Find::name and open my $datafile, '<', $File::Find::name) {
@@ -1829,7 +1872,7 @@ sub _validate_dpkg {
 				}
 				close $datafile;
 			} elsif (!-l _) {
-				&stack_msg($msgs, "Couldn't read pkg-config file \"$filename\": $!");
+				&stack_msg($msgs, "Couldn't read $filetype file \"$filename\": $!");
 			}
 		}
 
@@ -1897,7 +1940,7 @@ sub _validate_dpkg {
 
 	# dpkg hates packages that contain no files
 	&stack_msg($msgs, "Package contains no files.") if not $dpkg_file_count;
-	
+
 	# handle messages generated during the File::Find loop
 	{
 		# when we switch to Tie::IxHash, we won't need to know the internal details of $msgs
@@ -1922,7 +1965,7 @@ sub _validate_dpkg {
 	# the warning is not issued
 	if ($installed_headers and $installed_ld_libs) {
 		if (!exists $deb_control->{builddependsonly} or $deb_control->{builddependsonly} =~ /Undefined/) {
-			print "Error: Headers installed in $basepath/include, as well as a .dylib file, but package does not declare BuildDependsOnly to be true (or false)\n";
+			print "Error: Headers installed (files in an include/ directory), as well as a .dylib file, but package does not declare BuildDependsOnly to be true (or false)\n";
 			$looks_good = 0;
 		}
 	}
