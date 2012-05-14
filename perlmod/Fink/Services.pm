@@ -2303,6 +2303,7 @@ sub add_user {
 	$home = $home || '/var/empty';
 	my $uid = get_unused_id() or return 0;
 	my $gid = getgrnam($group);
+	my $ret;
 
 	create_ds_entry("/Users/$user", ['UniqueID', $uid],
 	                                ['Password', '*'],
@@ -2313,13 +2314,16 @@ sub add_user {
 	                                ['RealName', $name]) or return 0;
 
 	if (defined $gid) {
-		return !system("dscl . -append /Groups/$group GroupMembership $user");
+		$ret = !system("dscl . -append /Groups/$group GroupMembership $user");
 	} else {
-		return create_ds_entry("/Groups/$group", ['PrimaryGroupID', $uid],
+		$ret = create_ds_entry("/Groups/$group", ['PrimaryGroupID', $uid],
 		                                         ['RecordName', $group],
 		                                         ['Password', '*'],
 		                                         ['GroupMembership', "$user"]);
 	}
+
+	system("dsmemberutil flushcache");
+	return $ret;
 }
 
 =item create_ds_entry
