@@ -262,9 +262,9 @@ print_breaking("The selfupdate method has not been set yet, so you ".
 	# build user settings
 	print "\n";
 	&print_breaking("Fink build user settings");
-    $_ = `id -P fink-bld 2>&1`;
+    chomp ($_ = `id -P fink-bld 2>&1`);
     ($real_uid,$real_gid) = /.*:.*:(\d+):(\d+):.*:.*:.*:.*:.*/ ;
-	$auto_uid = $config->param_boolean("AutoUid","True");
+	$auto_uid = $config->param_boolean("AutoUid","true");
 	$uid_min = $config->param("AutoUidMin",600);
 	$uid_max = $config->param("AutoUidMax",699);
     if ($real_uid) {
@@ -277,7 +277,11 @@ print_breaking("The selfupdate method has not been set yet, so you ".
 		$do_uid = &prompt_boolean(	"Fink's build user is currently set up. ".
 									"Do you want to reconfigure it?", default => 0); 
 		unless ($do_uid) {
-			&print_breaking("Using UID:$real_uid") unless $fink_conf_uid;
+			&print_breaking("Using UID:$real_uid") unless $fink_conf_uid == $real_uid;
+			$fink_conf_uid=$real_uid;
+			$auto_uid = "false" if !$config->param_boolean("AutoUid");
+			undef $uid_min if !$config->param("AutoUidMin");
+			undef $uid_max if !$config->param("AutoUidMax");
 		}
 	} 
 	if ($do_uid) {
@@ -293,13 +297,12 @@ print_breaking("The selfupdate method has not been set yet, so you ".
 								   	"policy on your network.  Allow Fink to set ". 
 								   	"the UID GID dynamically?", default => $auto_uid);
 		if ($auto_uid) {
+			$auto_uid = "true" ; 
 			IDRANGE: while (1) {
 				&print_breaking("The current ID search range is $uid_min-$uid_max.");
 				IDSCAN: for ($id = $uid_min; $id <= $uid_max; $id++) {
 					last IDSCAN unless (getpwuid $id or getgrgid $id);
 					print "$id failed\n";
-					print "UID:", (getpwuid $id), "\n";
-					print "GID:", (getgrgid $id), "\n";
 					if ($id == $uid_max) {
 						$id = -1;
 						last IDSCAN;
@@ -341,8 +344,6 @@ print_breaking("The selfupdate method has not been set yet, so you ".
 			}		
 		} else	{
 			$auto_uid="false";
-			undef $uid_min;
-			undef $uid_max;
 			MANUAL_UID: while (1) {					
 				$id = &prompt("Enter UID/GID value: ");
 				last MANUAL_UID unless (getpwuid $id or getgrgid $id);
@@ -361,6 +362,8 @@ print_breaking("The selfupdate method has not been set yet, so you ".
 				&print_breaking($fail_msg);
 				# unset values to keep them from getting entered in fink.conf
 			  	undef $auto_uid;
+			  	undef $uid_min;
+			  	undef $uid_max;
 				undef $fink_conf_uid;
 			}
 		}								
