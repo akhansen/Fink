@@ -238,8 +238,9 @@ sub process {
 	}
 
 	# update fink-bld if required
-	my $status=&ensure_fink_bld() if $cmd ne "configure";
-		
+	{
+		my $status=&ensure_fink_bld() if ($cmd =~ /build|update|install|update|activate|use/) ;
+	}	
 	# Warn about Spotlight
 	if (&spotlight_warning()) {
 		$self->{config}->save;
