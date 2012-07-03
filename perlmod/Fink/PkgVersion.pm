@@ -1795,10 +1795,10 @@ sub get_build_directory {
 	}
 	else {
 		$dir = $self->get_tarball(); # never undef b/c never get here if no source
-		if ($dir =~ /^(.*)\.tar(\.(gz|z|Z|bz2))?$/) {
+		if ($dir =~ /^(.*)[\.\-]tar(\.(gz|z|Z|bz2|xz))?$/) {
 			$dir = $1;
 		}
-		if ($dir =~ /^(.*)\.(tgz|zip)$/) {
+		if ($dir =~ /^(.*)[\.\-](t[gbx]z|zip|ZIP)$/) {
 			$dir = $1;
 		}
 
@@ -1898,9 +1898,9 @@ sub get_splitoffs {
 
   my @relatives = $pv->get_relatives;
 
-Get the other packages that are splitoffs of this one (of of its parent, if
+Get the other packages that are splitoffs of this one (or of its parent, if
 this package is a splitoff). Does not include this package, but does include
-the parent.
+the parent (in case this package is a splitoff).
 
 =cut
 
@@ -2481,6 +2481,7 @@ sub find_debfile {
 #     2 - return build dependencies only
 #   $field is either "depends" or "conflicts" (case-insensitive)
 #   $forceoff is a boolean (default is false) that indicates...something
+#
 #   @deplist is list of refs to lists of PkgVersion objects
 #     @deplist joins the referenced lists as logical AND
 #     each referenced list is joined as logical OR
@@ -2761,7 +2762,7 @@ package family. Compile-time conflicts (1,1) is the BuildConflicts of
 the parent of the package family. This method is not recursive in any
 other sense.
 
-This method return pkgnames and other Depends-style string data in a
+This method returns pkgnames and other Depends-style string data in a
 list-of-lists structure, unlike resolve_depends, which gives a flat
 list of PkgVersion objects.
 
@@ -3505,8 +3506,8 @@ GCC_MSG
 		# Determine unpack command
 		$unpack_cmd = "cp $found_archive ."; # non-archive file
 		# check for a tarball
-		if ($archive =~ /[\.\-]tar$/ or $archive =~ /[\.\-]t.*(z|Z).*/) {
-			if (!$tar_is_pax) {  # No SourceFileNRename
+		if ($archive =~ /[\.\-]tar(\.(gz|z|Z|bz2|xz))?$/ or $archive =~ /[\.\-]t[gbx]z$/) {
+			if (!$tar_is_pax) {  # No TarFilesRename
 				# Using "bzip2" for "bzip2" or if we're not on a bzipped tarball
 				if (!($alt_bzip2 and $archive =~ /[\.\-]t(ar\.)?bz2?$/)) { 
 					$unpack_cmd = "$tarcommand $found_archive"; #let tar figure it out 
@@ -3524,7 +3525,7 @@ GCC_MSG
 				$unpack_cmd = "$cat $found_archive | $tarcommand $renamelist";
 			}
 		# Zip file
-		} elsif ($archive =~ /\.[zZ][iI][pP]$/) {
+		} elsif ($archive =~ /\.(zip|ZIP)$/) {
 			$unpack_cmd = "$unzip -o $found_archive";
 		}
 	
@@ -3549,7 +3550,7 @@ GCC_MSG
 		chdir $destdir;
 		$self->run_script($unpack_cmd, "unpacking '$archive'", 1, 1);
 
-		$tries = 0;
+		$tar_is_pax=0;
 	}
 }
 
