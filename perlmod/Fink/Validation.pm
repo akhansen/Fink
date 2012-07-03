@@ -4,7 +4,7 @@
 #
 # Fink - a package manager that downloads source and installs it
 # Copyright (c) 2001 Christoph Pfisterer
-# Copyright (c) 2001-2011 The Fink Package Manager Team
+# Copyright (c) 2001-2012 The Fink Package Manager Team
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -632,6 +632,18 @@ sub validate_info_file {
 				print "Error: \"$_\" does not have a corresponding \"$md5_field\" or \"$checksum_field\" field. ($filename)\n";
 				$looks_good = 0;
 			}
+			# check for allowed compression types while we're looping over sources
+			# xz
+			if (exists $source_props->{$_} and $properties->{$_} =~ /\.xz\b/ ) {
+				unless ($properties->{builddepends} =~ /\bxz\b/) {
+					print "Error: use of an xz-formatted archive in \"$_\" requires declaring a BuildDepends: xz. ($filename)\n";
+					$looks_good=0;
+				}
+				# tar.xz 
+				if ($properties->{$_} =~ /\.tar\.xz\b/ ) {
+					$looks_good=0 unless _min_fink_version($properties->{builddepends}, '0.31.7', 'use of a .tar.xz archive', $filename); 
+				}
+			}
 		}
 		
 	}
@@ -909,7 +921,9 @@ sub validate_info_file {
 
 		# must declare BuildDepends on a fink that supports it
 		if ($field eq "patchfile") {
-			$looks_good = 0 unless _min_fink_version($properties->{builddepends}, '0.24.12', 'use of PatchFile', $filename);
+# 0.24.12 came out many years ago and nothing that old likely even
+# boots on any currently supported OSX
+#			$looks_good = 0 unless _min_fink_version($properties->{builddepends}, '0.24.12', 'use of PatchFile', $filename);
 		} else {
 			$looks_good = 0 unless _min_fink_version($properties->{builddepends}, '0.30.0', 'use of PatchFileN', $filename);
 		}
@@ -1449,7 +1463,7 @@ sub validate_dpkg_unpacked {
 #     - installation of .elc files
 #     - (it's now OK to install files directly into
 #        /sw/share/emacs/site-lisp, so we no longer check for this)
-# - BuildDependsOnly: if package stores files in /sw/include, it should
+# - BuildDependsOnly: if package stores files an include/ dir, it should
 #     declare BuildDependsOnly true
 # - Check presence and execute-flag on executable specified in daemonicfile
 # - If a package contains a daemonicfile, it should Depends:daemonic
