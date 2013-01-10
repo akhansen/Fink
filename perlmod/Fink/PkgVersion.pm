@@ -5278,6 +5278,7 @@ sub package_error {
 		$error .= "\n\n" . $opts{'preamble'};
 	}
 	$error .= "\n\n" .
+		"**Note:  OS X 10.4 is not officially supported by the Fink project.**\n"
 		"Before reporting any errors, please run \"fink selfupdate\" and try again.\n" .
 		"If you continue to have issues, please check to see if the FAQ on Fink's \n".
 		"website solves the problem.  If not, ask on one of these mailing lists:\n\n" .
